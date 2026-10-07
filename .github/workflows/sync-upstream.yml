@@ -1,0 +1,112 @@
+# Polls upstream for new releases and POSTs the COPR webhook.
+#
+# This file is the only part of the repository that knows builds are triggered
+# by a timer. The build script resolves the version itself, so swapping this for
+# any other trigger means POSTing the same webhook URL and changing nothing else.
+
+name: Sync upstream release
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Trigger a rebuild even if COPR already has this version
+        type: boolean
+        default: false
+
+# Keep a scheduled run and a manual run from racing to submit the same build.
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve latest upstream release
+        id: upstream
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          version=$(./scripts/latest-version.sh)
+          echo "Upstream latest: ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Check what COPR already built
+        id: copr
+        env:
+          COPR_OWNER: ${{ vars.COPR_OWNER }}
+          COPR_PROJECT: ${{ vars.COPR_PROJECT }}
+        run: |
+          set -euo pipefail
+          url="https://copr.fedorainfracloud.org/api_3/package"
+          url+="?ownername=${COPR_OWNER}&projectname=${COPR_PROJECT}"
+          url+="&packagename=kubectx&with_latest_build=True"
+
+          # Before the first build the package does not exist, which the API
+          # reports as an error. That is a reason to build, not to fail.
+          body=$(curl -sSL "$url" || echo '{}')
+
+          BODY="$body" python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json, os
+          try:
+              body = json.loads(os.environ.get("BODY") or "{}")
+          except json.JSONDecodeError:
+              body = {}
+          latest = (body.get("builds") or {}).get("latest") or {}
+          pkg = latest.get("source_package") or {}
+          # COPR reports version-release ("0.11.0-1").
+          version = (pkg.get("version") or "").rsplit("-", 1)[0]
+          print(f"version={version}")
+          print(f"state={latest.get('state') or 'none'}")
+          PY
+
+      - name: Decide
+        id: decide
+        env:
+          UPSTREAM: ${{ steps.upstream.outputs.version }}
+          BUILT: ${{ steps.copr.outputs.version }}
+          STATE: ${{ steps.copr.outputs.state }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          echo "upstream=${UPSTREAM}  copr=${BUILT:-none}  state=${STATE}"
+
+          if [[ "$FORCE" == "true" ]]; then
+            echo "Manual force requested."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$UPSTREAM" != "$BUILT" ]]; then
+            echo "New upstream release."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$STATE" == "failed" ]]; then
+            # Not retried on a schedule: retrying every six hours would bury
+            # the real error. Re-run with force once it is fixed.
+            echo "::warning::COPR build of ${UPSTREAM} failed. Fix, then re-run with force."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Up to date."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger COPR build
+        if: steps.decide.outputs.build == 'true'
+        env:
+          WEBHOOK: ${{ secrets.COPR_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${WEBHOOK}" ]]; then
+            echo "COPR_WEBHOOK_URL secret is not set." >&2
+            exit 1
+          fi
+          # The build script resolves the version itself, so the payload is
+          # irrelevant and an empty POST is enough.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${WEBHOOK}")
+          echo "COPR webhook responded ${code}"
+          [[ "$code" == "200" ]]
