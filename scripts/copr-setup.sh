@@ -62,7 +62,7 @@ else
     echo ">>> Creating project '${COPR_OWNER}/${COPR_PROJECT}'"
     copr-cli create "$COPR_PROJECT" "${chroot_args[@]}" \
         --description "kubectx and kubens - switch between Kubernetes contexts and namespaces. Built from upstream source." \
-        --instructions "dnf copr enable ${COPR_OWNER}/${COPR_PROJECT} && dnf install kubectx"
+        --instructions "sudo dnf copr enable ${COPR_OWNER}/${COPR_PROJECT} && sudo dnf install kubectx"
 fi
 
 # Keeping the build logic in git rather than the COPR web form means it stays

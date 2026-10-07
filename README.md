@@ -3,8 +3,8 @@
 Fedora COPR packaging for [kubectx and kubens](https://github.com/ahmetb/kubectx).
 
 ```
-dnf copr enable squiddim/kubectx
-dnf install kubectx
+sudo dnf copr enable squiddim/kubectx
+sudo dnf install kubectx
 ```
 
 ## What it does
